@@ -8,38 +8,21 @@ import fitz
 from PIL import Image
 import io
 import torch
-from transformers import CLIPProcessor, CLIPModel, BlipProcessor, BlipForConditionalGeneration
-import pytesseract
+from paddleocr import PaddleOCR
+from transformers import BlipProcessor, BlipForConditionalGeneration
+import logging
+import numpy as np
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TOKENIZERS_PARALLELISM"] = "false" # supress warning from BLIP
+logging.getLogger("ppocr").setLevel(logging.ERROR) # supress paddle log
 
 def process_file(file_path):
 
-    plain_text_files = [
-        'txt',      # Plain text
-        'csv',      # Comma-separated values (structured plain text)
-        'json',     # JSON files (structured but still plain text)
-        'md',       # Markdown files
-        'log',      # Log files (plain text)
-        # Programming language files
-        'py',       # Python scripts
-        'java',     # Java source code
-        'js',       # JavaScript files
-        'c',        # C source code
-        'cpp',      # C++ source code
-        'rb',       # Ruby scripts
-        'go',       # Go source code
-        'rs',       # Rust source code
-        'html',     # HTML files (could be in both plain-text or XML-based depending on use)
-        'css',      # CSS files (styling for HTML)
-        'xml'       # XML (common for data and config files)
-    ]
-
     xml_based_files = [
-        'docx',     # Microsoft Word (XML structure inside ZIP container)
-        'xlsx',     # Microsoft Excel (XML structure inside ZIP container)
-        'pptx',     # Microsoft PowerPoint (XML structure inside ZIP container)
-        'pdf'       # When processed as XML (via libraries like pdfminer for structured content)
+        'docx',     # Microsoft Word
+        'xlsx',     # Microsoft Excel
+        'pptx',     # Microsoft PowerPoint
+        'pdf'   
     ]
 
     image_files = [
@@ -51,9 +34,7 @@ def process_file(file_path):
 
     file_extension = os.path.splitext(file_path)[-1].lower().strip('.')
 
-    if file_extension in plain_text_files:
-        return _handle_text(file_path)
-    elif file_extension in xml_based_files:
+    if file_extension in xml_based_files:
         # 这几个XML还都不一样
         # import各自的库
         return _handle_xml(file_path, file_extension)
@@ -197,6 +178,7 @@ def _handle_pdf(file_path):
         with fitz.open(file_path) as doc:
             for page_number, page in enumerate(pdf.pages):
                 text = page.extract_text().strip() if page.extract_text() else ""
+                tables = page.extract_tables()
                 images = []
                 img_list = doc[page_number].get_images(full=True)
                 for img in img_list:
@@ -206,7 +188,8 @@ def _handle_pdf(file_path):
                 pdf_data['content'].append({
                     'page': page_number + 1,
                     'text': text,
-                    'images': images
+                    'images': images,
+                    'tables': tables
                 })
     
     return json.dumps(pdf_data, ensure_ascii=False, indent=4)
@@ -214,15 +197,18 @@ def _handle_pdf(file_path):
 def _handle_image(file_path=None, xref=None, blob=None):
     '''Handles image-based files, performs OCR in both Chinese and English, and generates captions.'''
     
-    # Load the image
     image = _build_image(file_path=file_path, xref=xref, blob=blob)
     if image is None:
         return {"error": "Invalid image input"}
     
-    # Step 1: OCR extraction for both Chinese and English
-    extracted_text = pytesseract.image_to_string(image, lang='chi_sim+eng').strip()
+    ocr = PaddleOCR(lang='ch', use_angle_cls=False)
+    image_np = np.array(image)
+    result = ocr.ocr(image_np, cls=True)  # Set `cls=True` for better accuracy in Chinese text recognition
+    if result[0]:
+        extracted_text = " ".join([line[1][0] for line in result[0]]).strip()
+    else:
+        extracted_text = ""
 
-    # Step 2: Image captioning with BLIP
     blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
     blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
     inputs = blip_processor(image, return_tensors="pt")
@@ -232,55 +218,11 @@ def _handle_image(file_path=None, xref=None, blob=None):
     
     caption = blip_processor.decode(out[0], skip_special_tokens=True)
 
-    # Step 3: Return both the extracted text and the generated caption
     return {
         'content': extracted_text,
         'caption': caption
     }
 
-
-# def _handle_image(file_path=None, xref=None, blob=None):
-#     '''Handles image-based files and performs classification or text extraction.'''
-#     # Load the model and processor
-#     model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-#     processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-
-#     image = _build_image(file_path=file_path, xref=xref, blob=blob)
-#     if image is None:
-#         return {"error": "Invalid image input"}
-    
-#     # Process image for zero-shot classification
-#     inputs = processor(images=image, return_tensors="pt", padding=True)
-#     candidate_labels = ["An image with text", "An image without clear text"]
-#     text_inputs = processor(text=candidate_labels, return_tensors="pt", padding=True, truncation=True)
-
-#     with torch.no_grad():
-#         image_outputs = model.get_image_features(**inputs)
-#         text_outputs = model.get_text_features(**text_inputs)
-    
-#     logits_per_image = (image_outputs @ text_outputs.T).softmax(dim=-1)  # Normalize the probabilities
-#     predicted_label_index = torch.argmax(logits_per_image).item()
-#     predicted_label = candidate_labels[predicted_label_index]
-
-#     # Extract text if the image contains mostly text, else caption the image
-#     if predicted_label == candidate_labels[0]:
-#         extracted_text = pytesseract.image_to_string(image).strip()
-#         return {
-#             'type': 'text_image',
-#             'content': extracted_text
-#         }
-#     else:
-#         blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-#         blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
-#         inputs = blip_processor(image, return_tensors="pt")
-#         with torch.no_grad():
-#             out = blip_model.generate(**inputs, max_new_tokens=50)
-#         caption = blip_processor.decode(out[0], skip_special_tokens=True)
-#         return {
-#             'type': 'caption_image',
-#             'content': caption
-#         }
-    
 
 def _build_image(file_path=None, xref=None, blob=None):
     if file_path:
@@ -290,16 +232,3 @@ def _build_image(file_path=None, xref=None, blob=None):
     elif blob is not None:
         return Image.open(io.BytesIO(blob))
     return None
-
-import argparse
-
-def main():
-    parser = argparse.ArgumentParser(description="Process one argument.")
-    parser.add_argument("file_path")
-    args = parser.parse_args()
-    file_path = args.file_path
-    print(f"Processing {file_path}...")
-    print(process_file(file_path))
-
-if __name__ == "__main__":
-    main()
