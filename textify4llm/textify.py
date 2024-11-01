@@ -12,6 +12,7 @@ from paddleocr import PaddleOCR
 from transformers import BlipProcessor, BlipForConditionalGeneration
 import logging
 import numpy as np
+import re
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false" # supress warning from BLIP
 logging.getLogger("ppocr").setLevel(logging.ERROR) # supress paddle log
@@ -57,7 +58,7 @@ def _handle_text(file_path):
         'filename': file_name,
         'content': content
     }
-    return json.dumps(text_data, ensure_ascii=False, indent=4)
+    return text_data
 
 def _handle_xml(file_path, file_extension):
     '''Handles XML-based files.'''
@@ -124,9 +125,9 @@ def _handle_docx(file_path):
         if images:
             doc_data['images'] = images
 
-        return json.dumps(doc_data, ensure_ascii=False, indent=4)
+        return doc_data
     except Exception as e:
-        return json.dumps({'error': f'Error processing DOCX: {str(e)}'}, ensure_ascii=False, indent=4)
+        return {'error': f'Error processing DOCX: {str(e)}'}
 
 
 def _handle_xlsx(file_path):
@@ -145,54 +146,58 @@ def _handle_xlsx(file_path):
                 'data': csv_data
             })
         
-        return json.dumps(xlsx_data, ensure_ascii=False, indent=4)
+        return xlsx_data
     except Exception as e:
-        return json.dumps({'error': f'Error processing XLSX: {str(e)}'}, ensure_ascii=False, indent=4)
+        return {'error': f'Error processing XLSX: {str(e)}'}
     
 def _handle_pptx(file_path):
     '''Handles PPT files.'''
-    file_name = os.path.basename(file_path)
-    ppt_data = {'filename': file_name, 'content': []}
+    try:
+        file_name = os.path.basename(file_path)
+        ppt_data = {'filename': file_name, 'content': []}
 
-    presentation = Presentation(file_path)
-    
-    for slide_number, slide in enumerate(presentation.slides):
-        slide_text = " ".join([shape.text for shape in slide.shapes if hasattr(shape, "text")]).strip()
-        slide_images = [_handle_image(blob=shape.image.blob) for shape in slide.shapes if shape.shape_type == 13]  # Shape type 13 is Picture
+        presentation = Presentation(file_path)
         
-        ppt_data['content'].append({
-            'slide': slide_number + 1,
-            'text': slide_text,
-            'images': slide_images
-        })
+        for slide_number, slide in enumerate(presentation.slides):
+            slide_text = " ".join([shape.text for shape in slide.shapes if hasattr(shape, "text")]).strip()
+            slide_images = [_handle_image(blob=shape.image.blob) for shape in slide.shapes if shape.shape_type == 13]  # Shape type 13 is Picture
+            
+            ppt_data['content'].append({
+                'slide': slide_number + 1,
+                'text': slide_text,
+                'images': slide_images
+            })
 
-    return json.dumps(ppt_data, ensure_ascii=False, indent=4)
+        return ppt_data
+    except Exception as e:
+        return {'error': f'Error processing PPTX: {str(e)}'}
 
 
 def _handle_pdf(file_path):
     '''Handles PDF files.'''
     file_name = os.path.basename(file_path)
     pdf_data = {'filename': file_name, 'content': []}
-
-    with pdfplumber.open(file_path) as pdf:
-        with fitz.open(file_path) as doc:
-            for page_number, page in enumerate(pdf.pages):
-                text = page.extract_text().strip() if page.extract_text() else ""
-                tables = page.extract_tables()
-                images = []
-                img_list = doc[page_number].get_images(full=True)
-                for img in img_list:
-                    xref = img[0]
-                    base_image = doc.extract_image(xref)
-                    images.append(_handle_image(blob=base_image['image']))
-                pdf_data['content'].append({
-                    'page': page_number + 1,
-                    'text': text,
-                    'images': images,
-                    'tables': tables
-                })
+    try: 
+        with pdfplumber.open(file_path) as pdf, fitz.open(file_path) as doc:
+                for page_number, page in enumerate(pdf.pages):
+                    text = page.extract_text().strip() if page.extract_text() else ""
+                    tables = page.extract_tables()
+                    images = []
+                    img_list = doc[page_number].get_images(full=True)
+                    for img in img_list:
+                        xref = img[0]
+                        base_image = doc.extract_image(xref)
+                        images.append(_handle_image(blob=base_image['image']))
+                    pdf_data['content'].append({
+                        'page': page_number + 1,
+                        'text': text,
+                        'images': images,
+                        'tables': tables
+                    })
     
-    return json.dumps(pdf_data, ensure_ascii=False, indent=4)
+        return pdf_data
+    except Exception as e:
+        return {'error': f'Error processing PDF: {str(e)}'}
 
 def _handle_image(file_path=None, xref=None, blob=None):
     '''Handles image-based files, performs OCR in both Chinese and English, and generates captions.'''

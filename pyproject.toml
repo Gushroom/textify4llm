@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "textify4llm"
-version = "0.2.0"
+version = "0.2.1"
 authors = [{ name="Gushroom", email="972648237@qq.com" }]
 description = "Converts any file format into plaintext/JSON, enabling multimodality for any LLM"
 readme = "README.md"
